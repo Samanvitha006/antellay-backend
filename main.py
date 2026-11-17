@@ -18,7 +18,7 @@ app.add_middleware(
 def read_root():
     return {"status": "Antellay AEGIS Backend Online"}
 
-@app.get("/api/analyze/default")
+@app.get("/run-inference")
 def analyze_default():
     data = load_channel_data("P-1")
     out_df = run_detectors(data["train_df"], data["test_df"], data["feature_cols"])
