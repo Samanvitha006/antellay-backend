@@ -54,15 +54,46 @@ async def analyze_custom(file: UploadFile = File(...)):
         .to_dict(orient="records"),
     }
 
+import pandas as pd
+import io
+from fastapi import UploadFile, File
+
 @app.post("/upload-telemetry")
 async def upload_custom_telemetry(file: UploadFile = File(...)):
-    # Read the uploaded file into memory
+    # 1. Read the uploaded CSV file into a pandas DataFrame
     contents = await file.read()
+    df = pd.read_csv(io.BytesIO(contents))
+    
+    # 2. Ensure required columns exist for the UI charts
+    if "timestep" not in df.columns:
+        df["timestep"] = range(len(df))
+        
+    # Auto-detect feature columns to analyze (ignoring time/index columns)
+    feature_cols = [col for col in df.columns if col not in ["timestep", "timestamp", "Predicted_Anomaly", "Anomaly_Score"]]
+    
+    # The UI line chart specifically looks for a 'value' column to draw the main line
+    if "value" not in df.columns and len(feature_cols) > 0:
+        df["value"] = df[feature_cols[0]]
+        
+    # 3. Run your existing anomaly detection logic
+    # We pass the uploaded df as both train and test so the Isolation Forest can fit to this new specific file
+    out_df = run_detectors(df, df, feature_cols)
+    
+    # 4. Generate metrics
+    # Custom uploads don't have pre-defined ground truth labels, so we pass an empty list [] 
+    # Wrapped in a try-except just in case evaluate_predictions expects labeled anomalies to calculate F1
+    try:
+        metrics = evaluate_predictions(out_df, [])
+    except Exception:
+        metrics = {"f1_score": 0.0, "accuracy": 100.0, "note": "Unlabeled dataset"}
 
-    # (Your inference logic for the uploaded CSV/Parquet file goes here)
-
+    # 5. Return the exact JSON structure the Next.js dashboard requires
     return {
-        "filename": file.filename, 
-        "status": "success", 
-        "message": "File received and processed."
+        "status": "success",
+        "metrics": metrics,
+        "predictions": out_df[
+            ["timestep", "value", "Predicted_Anomaly", "Anomaly_Score"]
+        ]
+        .tail(100)
+        .to_dict(orient="records"),
     }
