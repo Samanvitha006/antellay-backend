@@ -53,3 +53,16 @@ async def analyze_custom(file: UploadFile = File(...)):
         .tail(100)
         .to_dict(orient="records"),
     }
+
+@app.post("/upload-telemetry")
+async def upload_custom_telemetry(file: UploadFile = File(...)):
+    # Read the uploaded file into memory
+    contents = await file.read()
+
+    # (Your inference logic for the uploaded CSV/Parquet file goes here)
+
+    return {
+        "filename": file.filename, 
+        "status": "success", 
+        "message": "File received and processed."
+    }
