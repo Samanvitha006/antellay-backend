@@ -1,4 +1,5 @@
 import io
+import random
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 import pandas as pd
@@ -88,8 +89,21 @@ async def upload_custom_telemetry(file: UploadFile = File(...)):
         metrics = {"f1_score": 0.0, "accuracy": 100.0, "note": "Unlabeled dataset"}
 
     # 5. Return the exact JSON structure the Next.js dashboard requires
-    # Determine suspect based on what columns exist in the uploaded file
-    suspect = "Battery / Power Subsystem" if "voltage" in [c.lower() for c in df.columns] else "Unknown Subsystem"
+  # 5. Determine suspect and battery dynamically based on uploaded columns
+    lower_cols = [c.lower() for c in df.columns]
+    
+    suspect = "Battery / Power Subsystem" if "voltage" in lower_cols else "Unknown Subsystem"
+
+    if "battery" in lower_cols:
+        col_name = df.columns[lower_cols.index("battery")]
+        latest_val = df[col_name].iloc[-1]
+        real_battery = f"{int(latest_val)}%"
+    elif "soc" in lower_cols:
+        col_name = df.columns[lower_cols.index("soc")]
+        latest_val = df[col_name].iloc[-1]
+        real_battery = f"{int(latest_val)}%"
+    else:
+        real_battery = "N/A"
 
     return {
         "status": "success",
@@ -97,8 +111,6 @@ async def upload_custom_telemetry(file: UploadFile = File(...)):
         "predictions": out_df[
             ["timestep", "value", "Predicted_Anomaly", "Anomaly_Score"]
         ].tail(100).to_dict(orient="records"),
-        
-        # Add new data blocks for the frontend to consume
         "root_cause": {
             "primary_suspect": suspect,
             "insights": [
@@ -107,7 +119,7 @@ async def upload_custom_telemetry(file: UploadFile = File(...)):
             ]
         },
         "predictive_health": {
-            "battery_level": "68%",
+            "battery_level": real_battery,
             "time_to_critical": "7h"
         }
     }
