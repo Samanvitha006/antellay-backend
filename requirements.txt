@@ -6,3 +6,5 @@ uvicorn
 python-multipart
 datasets
 pyarrow
+pytest
+httpx
