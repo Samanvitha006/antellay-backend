@@ -30,6 +30,7 @@ ALLOWED_ORIGINS = os.getenv(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in ALLOWED_ORIGINS],
+    allow_origin_regex=r"https://antellay-.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -64,6 +65,10 @@ def validate_and_clean_dataframe(df: pd.DataFrame):
     else:
         df["timestep"] = range(len(df))
 
+    # Normalize optional Ground_Truth column name to ground_truth
+    if "Ground_Truth" in df.columns and "ground_truth" not in df.columns:
+        df["ground_truth"] = df["Ground_Truth"]
+
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     feature_cols = [
         c for c in numeric_cols
@@ -74,6 +79,20 @@ def validate_and_clean_dataframe(df: pd.DataFrame):
 
     df[feature_cols] = df[feature_cols].interpolate(method="linear").bfill().ffill()
     return df, feature_cols
+
+
+def extract_sequences_from_labels(gt_series: pd.Series) -> list[list[int]]:
+    gt = gt_series.fillna(0).astype(int).values
+    sequences, start = [], None
+    for i, val in enumerate(gt):
+        if val == 1 and start is None:
+            start = i
+        elif val == 0 and start is not None:
+            sequences.append([start, i - 1])
+            start = None
+    if start is not None:
+        sequences.append([start, len(gt) - 1])
+    return sequences
 
 
 def build_predictive_health(df: pd.DataFrame) -> dict:
@@ -186,7 +205,7 @@ def analyze_benchmark(
 
         return {
             "status": "success",
-           "data_source": {
+            "data_source": {
                 "type": "synthetic_demo" if bundle.get("is_synthetic") else "public_benchmark",
                 "label": (
                     f"Synthetic Demo Data · Offline Fallback ({channel})"
@@ -240,10 +259,29 @@ async def upload_custom_telemetry(
     test_df = df.iloc[split_idx:].copy() if len(df) > 20 else df.copy()
 
     out_df = run_detectors(train_df, test_df, feature_cols, detector_type=detector_type, threshold_pct=threshold_pct)
+    has_ground_truth = "ground_truth" in test_df.columns
+
+    if has_ground_truth:
+        out_df["ground_truth"] = test_df["ground_truth"].fillna(0).astype(int).values
+        sequences = extract_sequences_from_labels(test_df["ground_truth"])
+        metrics = evaluate_predictions(out_df, sequences)
+        disclosure = "User-uploaded telemetry file with ground-truth labels — supervised metrics dynamically computed."
+    else:
+        metrics = {
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "fpr": None,
+            "detected_sequences": None,
+            "total_sequences": None,
+            "mean_detection_delay": "N/A",
+        }
+        disclosure = "User-uploaded telemetry file without ground-truth labels — supervised metrics are N/A."
+
     root_cause, triage_log = extract_triage_and_rca(out_df, test_df)
 
     pred_cols = [
-        c for c in ["timestep", "value", "baseline_value", "Predicted_Anomaly", "Anomaly_Score", "Severity"]
+        c for c in ["timestep", "value", "baseline_value", "Predicted_Anomaly", "Anomaly_Score", "Severity", "ground_truth"]
         if c in out_df.columns
     ]
 
@@ -253,17 +291,9 @@ async def upload_custom_telemetry(
             "type": "customer_upload",
             "label": f"Uploaded Telemetry ({filename})",
             "is_live": False,
-            "disclosure": "User-uploaded telemetry file. Unlabeled dataset — supervised metrics are N/A.",
+            "disclosure": disclosure,
         },
-        "metrics": {
-            "precision": None,
-            "recall": None,
-            "f1": None,
-            "fpr": None,
-            "detected_sequences": None,
-            "total_sequences": None,
-            "mean_detection_delay": "N/A",
-        },
+        "metrics": metrics,
         "predictions": out_df[pred_cols].tail(200).to_dict(orient="records"),
         "root_cause": root_cause,
         "triage_log": triage_log,
