@@ -186,11 +186,19 @@ def analyze_benchmark(
 
         return {
             "status": "success",
-            "data_source": {
-                "type": "public_benchmark",
-                "label": f"NASA Telemanom Public Benchmark ({bundle['spacecraft']} · {channel})",
+           "data_source": {
+                "type": "synthetic_demo" if bundle.get("is_synthetic") else "public_benchmark",
+                "label": (
+                    f"Synthetic Demo Data · Offline Fallback ({channel})"
+                    if bundle.get("is_synthetic")
+                    else f"NASA Telemanom Public Benchmark ({bundle['spacecraft']} · {channel})"
+                ),
                 "is_live": False,
-                "disclosure": "Anonymized, dimensionless public benchmark telemetry. Not a live spacecraft feed.",
+                "disclosure": (
+                    "Offline synthetic fallback telemetry with an injected anomaly. Not live spacecraft data."
+                    if bundle.get("is_synthetic")
+                    else "Anonymized, dimensionless public benchmark telemetry. Not a live spacecraft feed."
+                ),
             },
             "metrics": metrics,
             "predictions": out_df[pred_cols].tail(200).to_dict(orient="records"),
