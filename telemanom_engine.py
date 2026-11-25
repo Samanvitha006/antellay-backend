@@ -33,51 +33,40 @@ def validate_and_clean_dataframe(df: pd.DataFrame) -> tuple[pd.DataFrame, list[s
 
 
 def load_channel_data(chan_id: str) -> dict:
-    """
-    Loads NASA Telemanom channel data using direct Hugging Face raw data URLs,
-    with a robust fallback to generate clean synthetic telemetry if offline.
-    """
     os.makedirs("data/train", exist_ok=True)
     os.makedirs("data/test", exist_ok=True)
 
     train_path = f"data/train/{chan_id}.parquet"
     test_path = f"data/test/{chan_id}.parquet"
 
-    # Correct Hugging Face dataset raw file URLs for parquet splits
     train_url = f"https://huggingface.co/datasets/appleparan/telemanom/raw/main/train/{chan_id}.parquet"
     test_url = f"https://huggingface.co/datasets/appleparan/telemanom/raw/main/test/{chan_id}.parquet"
 
-    success = False
+    is_synthetic = False
     if not os.path.exists(train_path) or not os.path.exists(test_path):
         try:
             urllib.request.urlretrieve(train_url, train_path)
             urllib.request.urlretrieve(test_url, test_path)
-            success = True
         except Exception:
-            pass
+            is_synthetic = True
+            timesteps = np.arange(1500)
+            np.random.seed(42)
+            train_data = pd.DataFrame({
+                "timestep": timesteps[:1000],
+                "value": np.sin(timesteps[:1000] / 20.0) + np.random.normal(0, 0.1, 1000),
+            })
+            test_data = pd.DataFrame({
+                "timestep": timesteps[1000:],
+                "value": np.sin(timesteps[1000:] / 20.0) + np.random.normal(0, 0.1, 500),
+            })
+            # Inject synthetic anomaly at timesteps 1200-1230 (indices 200-230)
+            test_data.loc[200:230, "value"] += 5.5
+            for i in range(5):
+                train_data[f"cmd_{i}"] = 0
+                test_data[f"cmd_{i}"] = 0
 
-    if not success and (not os.path.exists(train_path) or not os.path.exists(test_path)):
-        # Fallback: Generate valid synthetic telemetry matching Telemanom dimensions for local testing
-        timesteps = np.arange(1500)
-        np.random.seed(42)
-        train_data = pd.DataFrame({
-            "timestep": timesteps[:1000],
-            "value": np.sin(timesteps[:1000] / 20.0) + np.random.normal(0, 0.1, 1000)
-        })
-        for i in range(5):
-            train_data[f"cmd_{i}"] = 0
-
-        test_data = pd.DataFrame({
-            "timestep": timesteps[1000:],
-            "value": np.sin(timesteps[1000:] / 20.0) + np.random.normal(0, 0.1, 500)
-        })
-        # Inject synthetic anomaly sequence
-        test_data.loc[200:230, "value"] += 5.5
-        for i in range(5):
-            test_data[f"cmd_{i}"] = 0
-
-        train_data.to_parquet(train_path)
-        test_data.to_parquet(test_path)
+            train_data.to_parquet(train_path)
+            test_data.to_parquet(test_path)
 
     train_raw = pd.read_parquet(train_path)
     test_raw = pd.read_parquet(test_path)
@@ -85,60 +74,51 @@ def load_channel_data(chan_id: str) -> dict:
     train_df, feature_cols = validate_and_clean_dataframe(train_raw)
     test_df, _ = validate_and_clean_dataframe(test_raw)
 
-    labels_df = load_labels_metadata()
-    chan_meta = labels_df[labels_df["chan_id"] == chan_id]
+    spacecraft = "Synthetic Fallback" if is_synthetic else "Unknown"
+    anomaly_sequences = [[1200, 1230]] if is_synthetic else []
+    anomaly_classes = ["synthetic"] if is_synthetic else []
 
-    spacecraft = "Unknown"
-    anomaly_sequences = [[1200, 1230]] if chan_meta.empty else []
-    anomaly_classes = []
-
-    if not chan_meta.empty:
-        row = chan_meta.iloc[0]
-        spacecraft = str(row["spacecraft"])
-        try:
-            val_seq = row["anomaly_sequences"]
-            anomaly_sequences = ast.literal_eval(str(val_seq)) if pd.notna(val_seq) else []
-        except (ValueError, SyntaxError):
-            anomaly_sequences = []
-
-        if "class" in row and pd.notna(row["class"]):
+    if not is_synthetic:
+        labels_df = load_labels_metadata()
+        chan_meta = labels_df[labels_df["chan_id"] == chan_id]
+        if not chan_meta.empty:
+            row = chan_meta.iloc[0]
+            spacecraft = str(row["spacecraft"])
             try:
-                val_cls = row["class"]
-                anomaly_classes = ast.literal_eval(str(val_cls)) if pd.notna(val_cls) else []
+                val_seq = row["anomaly_sequences"]
+                anomaly_sequences = ast.literal_eval(str(val_seq)) if pd.notna(val_seq) else []
             except (ValueError, SyntaxError):
-                anomaly_classes = []
-
-    test_min = int(test_df["timestep"].min())
-    test_max = int(test_df["timestep"].max())
+                anomaly_sequences = []
+            if "class" in row and pd.notna(row["class"]):
+                try:
+                    anomaly_classes = ast.literal_eval(str(row["class"]))
+                except (ValueError, SyntaxError):
+                    anomaly_classes = []
 
     test_df["ground_truth"] = 0
     test_df["sequence_id"] = -1
 
-    adjusted_sequences = []
+    valid_sequences = []
+    test_min, test_max = int(test_df["timestep"].min()), int(test_df["timestep"].max())
     for idx, seq in enumerate(anomaly_sequences):
         start_step, end_step = int(seq[0]), int(seq[1])
-
-        # If metadata sequence is outside the test window, map it inside test range for evaluation
-        if start_step > test_max or end_step < test_min:
-            span = min(50, end_step - start_step) if end_step > start_step else 30
-            start_step = test_min + 80 + (idx * 120)
-            end_step = start_step + span
-
-        adjusted_sequences.append([start_step, end_step])
-        mask = (test_df["timestep"] >= start_step) & (test_df["timestep"] <= end_step)
-        test_df.loc[mask, "ground_truth"] = 1
-        test_df.loc[mask, "sequence_id"] = idx
+        # Only keep sequences that genuinely overlap the test window
+        if end_step >= test_min and start_step <= test_max:
+            valid_sequences.append([start_step, end_step])
+            mask = (test_df["timestep"] >= start_step) & (test_df["timestep"] <= end_step)
+            test_df.loc[mask, "ground_truth"] = 1
+            test_df.loc[mask, "sequence_id"] = idx
 
     return {
         "chan_id": chan_id,
         "spacecraft": spacecraft,
+        "is_synthetic": is_synthetic,
         "train_df": train_df,
         "test_df": test_df,
         "feature_cols": feature_cols,
-        "anomaly_sequences": adjusted_sequences,
+        "anomaly_sequences": valid_sequences,
         "anomaly_classes": anomaly_classes,
     }
-
 def run_detectors(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
@@ -158,23 +138,33 @@ def run_detectors(
         test_out[primary_col].rolling(window=rolling_window, min_periods=1).median()
     )
 
+    test_out = test_df.reset_index(drop=True).copy()
+    primary_col = "value" if "value" in feature_cols else feature_cols[0]
+
+    scaler = RobustScaler()
+    X_train = scaler.fit_transform(train_df[feature_cols])
+    X_test = scaler.transform(test_out[feature_cols])
+
+    test_out["baseline_value"] = (
+        test_out[primary_col].rolling(window=rolling_window, min_periods=1).median()
+    )
+
     if detector_type == "Rolling Robust Baseline (Statistical)":
         train_rolling_med = train_df[primary_col].rolling(window=rolling_window, min_periods=1).median()
         train_resid = np.abs(train_df[primary_col] - train_rolling_med)
         mad = np.median(train_resid) + 1e-6
 
-        train_scores = train_resid / mad
-        dynamic_threshold = np.percentile(train_scores, 100.0 - threshold_pct)
+        cal_scores = (train_resid / mad).values
+        dynamic_threshold = np.percentile(cal_scores, 100.0 - threshold_pct)
 
         test_resid = np.abs(test_out[primary_col] - test_out["baseline_value"])
-        test_scores = test_resid / mad
+        test_scores = (test_resid / mad).values
 
         test_out["Anomaly_Score"] = np.round(test_scores, 4)
         test_out["Predicted_Anomaly"] = (test_scores > dynamic_threshold).astype(int)
         test_out["Threshold_Used"] = round(float(dynamic_threshold), 4)
-
     else:
-        split_idx = int(len(X_train) * 0.85)
+        split_idx = max(5, int(len(X_train) * 0.85))
         X_fit, X_val = X_train[:split_idx], X_train[split_idx:]
 
         contamination_rate = max(0.01, min(0.25, threshold_pct / 100.0))
@@ -187,26 +177,32 @@ def run_detectors(
 
         val_raw_scores = model.decision_function(X_val)
         dynamic_threshold = np.percentile(val_raw_scores, threshold_pct)
+        cal_scores = -val_raw_scores  # Higher = more anomalous
 
         test_raw_scores = model.decision_function(X_test)
         test_out["Anomaly_Score"] = np.round(-test_raw_scores, 4)
         test_out["Predicted_Anomaly"] = (test_raw_scores < dynamic_threshold).astype(int)
         test_out["Threshold_Used"] = round(float(-dynamic_threshold), 4)
 
-    # Sequence smoothing to bridge fragmented temporal anomaly flags
-    preds = test_out["Predicted_Anomaly"].values
-    smoothed_preds = pd.Series(preds).rolling(window=7, min_periods=1, center=True).max().fillna(0).astype(int)
-    test_out["Predicted_Anomaly"] = smoothed_preds
+    # Causal trailing smoothing (no future look-ahead)
+    test_out["Predicted_Anomaly"] = (
+        test_out["Predicted_Anomaly"]
+        .rolling(window=3, min_periods=1, center=False)
+        .max()
+        .fillna(0)
+        .astype(int)
+    )
 
-    p98 = np.percentile(test_out["Anomaly_Score"], 98)
-    p90 = np.percentile(test_out["Anomaly_Score"], 90)
+    # Calibrate severity bands strictly on validation/training scores (zero test leakage)
+    high_thresh = float(np.percentile(cal_scores, 99.5))
+    med_thresh = float(np.percentile(cal_scores, 98.0))
 
     def assign_severity(row):
         if row["Predicted_Anomaly"] == 0:
             return "Nominal"
-        if row["Anomaly_Score"] >= p98:
+        if row["Anomaly_Score"] >= high_thresh:
             return "High"
-        if row["Anomaly_Score"] >= p90:
+        if row["Anomaly_Score"] >= med_thresh:
             return "Medium"
         return "Low"
 
@@ -238,7 +234,6 @@ def run_detectors(
     test_out["Triage_Action"] = [d[2] for d in diagnostics]
 
     return test_out
-
 def evaluate_predictions(test_df: pd.DataFrame, anomaly_sequences: list) -> dict:
     y_true = test_df["ground_truth"].values
     y_pred = test_df["Predicted_Anomaly"].values
