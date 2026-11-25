@@ -1,11 +1,9 @@
 import io
-import os
-import logging
-import pandas as pd
-import numpy as np
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+import random
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-
+import pandas as pd
+from telemanom_engine import evaluate_predictions, load_channel_data, run_detectors
 # 1. Structured API Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("antellay-aegis")
